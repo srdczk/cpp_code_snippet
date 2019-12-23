@@ -1,18 +1,14 @@
-//
-// Created by srdczk on 2019/12/17.
-//
 #include <muduo/net/EventLoop.h>
-#include "Echo.h"
-#include "Time.h"
+#include <muduo/net/InetAddress.h>
+#include "TimeServer.h"
 
 int main() {
     muduo::net::EventLoop loop;
-    muduo::net::InetAddress echoAddress(9090), timeAddress(9797);
-    EchoServer echoServer(&loop, echoAddress);
-    TimeServer timeServer(&loop, timeAddress);
-    timeServer.start();
-    echoServer.start();
+
+    muduo::net::InetAddress listenAddr(9999);
+;
+    TimeServer server(&loop, listenAddr);
+    server.start();
     loop.loop();
     return 0;
 }
-
