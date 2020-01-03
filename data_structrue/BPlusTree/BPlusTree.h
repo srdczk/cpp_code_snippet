@@ -37,6 +37,8 @@ struct IndexType {
 
 // 内部节点
 struct InternalNode {
+    // 声明 IndexType *
+    using ChildType = IndexType *;
     off_t parent; // 父节点偏移量
     off_t next;  // next 节点 偏移量
     off_t pre;
@@ -53,6 +55,7 @@ struct RecordType {
 };
 
 struct LeafNode {
+    using ChildType = RecordType *;
     // 父节点偏移量
     off_t parent;
     off_t next;
