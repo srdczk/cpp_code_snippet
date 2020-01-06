@@ -132,7 +132,7 @@ private:
 
     void mergeLeafs(LeafNode* left, LeafNode* right);
 
-    void mergeKeys(IndexType* where, InternalNode& node, InternalNode& next);
+    void mergeKeys(IndexType* where, InternalNode& node, InternalNode& next, bool change = false);
 
     bool borrowKey(bool fromRight, LeafNode& borrower);
 
@@ -167,13 +167,16 @@ void BPlusTree::createNode(off_t offset, T *node, T *next) {
 }
 template <typename T>
 void BPlusTree::removeNode(T *pre, T *node) {
+    // removeNode <--> node 和 pre 的关系
+    // node 的 offset pre->next
     freeNode(node, pre->next);
     pre->next = node->next;
-    if (node->next) {
-        T block;
-        readBlock(&block, node->next, NO_CHILDREN_SIZE);
-        block->pre = node->pre;
-        writeBlock(&block, node->next, NO_CHILDREN_SIZE);
+    if (pre->next) {
+        T node;
+        // readBlock <--> read 不带索引的大小
+        readBlock(&node, pre->next, NO_CHILDREN_SIZE);
+        node.pre = pre;
+        writeBlock(&node, pre->next, NO_CHILDREN_SIZE);
     }
     writeBlock(&meta_, OFFSET_META);
 }

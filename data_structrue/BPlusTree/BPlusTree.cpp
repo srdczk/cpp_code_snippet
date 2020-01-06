@@ -216,3 +216,224 @@ void BPlusTree::resetIndexChildrenParent(IndexType *begin
         ++begin;
     }
 }
+
+// BPlusTree 的 删除
+// 如果不存在, 返回 -1, 否则, 返回 0
+int BPlusTree::del(const KeyType &key) {
+    InternalNode parent;
+    LeafNode leaf;
+    off_t parentOffset = findIndex(key);
+    readBlock(&parent, parentOffset);
+    off_t leafOffset = findLeaf(parentOffset, key);
+    readBlock(&leaf, leafOffset);
+
+    if (!std::binary_search(begin(leaf), end(leaf), key)) return -1;
+    // 最小 <--> order / 2;
+    size_t minN = meta_.leafNodeNum == 1 ? 0 : meta_.order / 2;
+
+    RecordType *toDelete = find(leaf, key);
+    std::copy(toDelete + 1, end(leaf), toDelete);
+    leaf.n--;
+
+    // 结合或者向 兄弟借一个
+    if (leaf.n < minN) {
+        // 向兄弟 借 节点
+        bool borrowed = false;
+        if (leaf.pre) borrowed = borrowKey(false, leaf);
+        if (!borrowed && leaf.next) borrowed = borrowKey(true, leaf);
+
+        // 如果 没有借到, merge 并且向上删除
+        if (!borrowed) {
+            KeyType indexKey;
+            IndexType *where = find(parent, key);
+            if (where == end(parent) - 1) {
+                LeafNode pre;
+                readBlock(&pre, leaf.pre);
+                indexKey = pre.children[0].key;
+                mergeLeafs(&pre, &leaf);
+                removeNode(&pre, &leaf);
+                writeBlock(&pre, leaf.pre);
+            } else {
+                LeafNode next;
+                readBlock(&next, leaf.next);
+                indexKey = leaf.children[0].key;
+                mergeLeafs(&leaf, &next);
+                removeNode(&leaf, &next);
+                writeBlock(&leaf, leaf.pre);
+            }
+            removeFromIndex(parentOffset, parent, indexKey);
+        } else {
+            writeBlock(&leaf, leafOffset);
+        }
+    } else {
+        // 否则直接删除
+        // 不用删除index, 因为索引的相对关系没有变
+        writeBlock(&leaf, leafOffset);
+    }
+
+    return 0;
+}
+
+bool BPlusTree::borrowKey(bool fromRight, LeafNode &borrower) {
+    off_t offSet = fromRight ? borrower.next : borrower.pre;
+    LeafNode leaf;
+    readBlock(&leaf, offSet);
+    // 如果 leaf.n > meta_.order, 可以借出
+    if (leaf.n > meta_.order / 2) {
+        // change parent -> child
+        RecordType *lend, *put;
+        if (fromRight) {
+            lend = begin(leaf);
+            put = end(borrower);
+            changeParentChild(borrower.parent, begin(borrower)->key
+                    , leaf.children[1].key);
+        } else {
+            lend = end(leaf) - 1;
+            put = begin(borrower);
+            changeParentChild(leaf.parent, begin(leaf)->key
+                    , lend->key);
+        }
+        // 存储起来
+        std::copy_backward(put, end(borrower), end(borrower) + 1);
+        *put = *lend;
+        ++borrower.n;
+        std::copy(lend + 1, end(leaf), lend);
+        --leaf.n;
+        writeBlock(&leaf, offSet);
+        return true;
+    }
+    return false;
+
+}
+
+void BPlusTree::changeParentChild(off_t parent, const KeyType &o, const KeyType &n) {
+    InternalNode node;
+    readBlock(&node, parent);
+    IndexType *w = find(node, o);
+    w->key = n;
+    writeBlock(&node, parent);
+    if (w == node.children + node.n - 1) {
+        changeParentChild(node.parent, o, n);
+    }
+}
+
+void BPlusTree::removeFromIndex(off_t offset, InternalNode &node, const KeyType &key) {
+    size_t minN = meta_.rootOffset == offset ? 1 : meta_.order / 2;
+    KeyType indexKey = begin(node)->key;
+    IndexType *todel = find(node, key);
+    if (todel != end(node)) {
+        (todel + 1)->child = todel->child;
+        std::copy(todel + 1, end(node), todel);
+    }
+    --node.n;
+    if (node.n == 1 && meta_.rootOffset == offset && meta_.internalNodeNum != 1) {
+        // 如果 root 只剩下 一个指针了, 则 删除
+        freeNode(&node, meta_.rootOffset);
+        --meta_.height;
+        // 不用 堆内存空间, 全部存储在磁盘上
+        meta_.rootOffset = node.children[0].child;
+        writeBlock(&meta_, OFFSET_META);
+        return;
+    }
+
+    if (node.n < minN) {
+
+        InternalNode parent;
+        readBlock(&parent, node.parent);
+
+        bool borrowed = false;
+        // 只能够借同一个父亲的兄弟
+        if (offset != begin(parent)->child) {
+            borrowed = borrowKey(false, node, offset);
+        }
+        if (!borrowed && offset != (end(parent) - 1)->child) {
+            borrowed = borrowKey(true, node, offset);
+        }
+
+        if (!borrowed) {
+
+            if (offset == (end(parent) - 1)->child) {
+                // 需要 merge 操作
+                InternalNode pre;
+                readBlock(&pre, node.pre);
+                IndexType *where = find(parent, begin(pre)->key);
+                resetIndexChildrenParent(begin(node), end(node), node.pre);
+                mergeKeys(where, pre, node, true);
+                writeBlock(&pre, node.pre);
+            } else {
+                InternalNode next;
+                readBlock(&next, node.next);
+                IndexType *where = find(parent, begin(node)->key);
+                resetIndexChildrenParent(begin(next), end(next), offset);
+                mergeKeys(where, node, next);
+                writeBlock(&node, node.pre);
+            }
+            removeFromIndex(node.parent, parent, indexKey);
+        }
+
+    } else {
+        // 直接重写
+        writeBlock(&node, offset);
+    }
+}
+
+
+bool BPlusTree::borrowKey(bool fromRight, InternalNode &borrower,
+        off_t offset) {
+    off_t lenderOff = fromRight ? borrower.next : borrower.pre;
+    InternalNode lender;
+    readBlock(&lender, lenderOff);
+
+    if (lender.n > meta_.order / 2) {
+        IndexType *lend, *put;
+        InternalNode parent;
+
+        // 需要重新设置指针
+        if (fromRight) {
+            lend = begin(lender);
+            put = end(borrower);
+            readBlock(&parent, borrower.parent);
+
+            IndexType *where = std::lower_bound(begin(parent),
+                    end(parent) - 1, (end(borrower) - 1)->key);
+            where->key = lend->key;
+            writeBlock(&parent, borrower.parent);
+        } else {
+            lend = end(lender) - 1;
+            put = begin(borrower);
+
+            readBlock(&parent, lender.parent);
+
+            IndexType *where = find(parent, begin(lender)->key);
+
+            where->key = (lend - 1)->key;
+            writeBlock(&parent, lender.parent);
+        }
+
+        std::copy_backward(put, end(borrower), end(borrower) + 1);
+        *put = *lend;
+        ++borrower.n;
+
+        resetIndexChildrenParent(lend, lend + 1, offset);
+
+        std::copy(lend + 1, end(lender), lend);
+        --lender.n;
+        writeBlock(&lender, lenderOff);
+        return true;
+    }
+    return false;
+}
+
+void BPlusTree::mergeLeafs(LeafNode *left,
+        LeafNode *right) {
+    std::copy(begin(*right), end(*right), end(*left));
+    left->n += right->n;
+}
+
+void BPlusTree::mergeKeys(IndexType *where, InternalNode &node,
+        InternalNode &next, bool change) {
+    if (change) where->key = (end(next) - 1)->key;
+    std::copy(begin(next), end(next), end(node));
+    node.n += next.n;
+    removeNode(&node, &next);
+}
