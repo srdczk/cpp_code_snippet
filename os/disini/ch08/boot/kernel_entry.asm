@@ -2,7 +2,3 @@
 [extern main]
     call main
     jmp $
-
-io_hlt:
-    hlt
-    ret
